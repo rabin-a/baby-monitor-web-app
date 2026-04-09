@@ -132,7 +132,48 @@ export default function PrivacyPage() {
             These servers only assist with connection setup and do not relay
             audio.
           </li>
+          <li>
+            <strong>Cloudflare Web Analytics</strong> — Privacy-first, cookieless
+            website analytics. Does not track individual users, does not use
+            cookies, does not collect personal data, and does not cross-reference
+            data across sites. Collects only aggregate page view metrics. Subject
+            to{" "}
+            <a
+              href="https://www.cloudflare.com/privacypolicy/"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="underline"
+            >
+              Cloudflare&apos;s Privacy Policy
+            </a>
+            .
+          </li>
+          <li>
+            <strong>Vercel Analytics</strong> — Privacy-friendly, cookieless
+            web analytics. Does not track individual users or collect personal
+            data. Subject to{" "}
+            <a
+              href="https://vercel.com/legal/privacy-policy"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="underline"
+            >
+              Vercel&apos;s Privacy Policy
+            </a>
+            .
+          </li>
         </ul>
+
+        <h2 className="text-lg font-semibold mt-8 mb-3">
+          Cookies &amp; Consent
+        </h2>
+        <p className="text-sm text-muted-foreground leading-relaxed">
+          This website does not use cookies. Our analytics providers (Cloudflare
+          Web Analytics and Vercel Analytics) are both cookieless and do not
+          require consent banners under GDPR, ePrivacy Directive, or similar
+          regulations. No cookie consent banner is needed or shown because no
+          cookies are set.
+        </p>
 
         <h2 className="text-lg font-semibold mt-8 mb-3">
           GDPR Compliance (EU Users)
