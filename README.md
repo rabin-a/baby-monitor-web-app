@@ -4,9 +4,7 @@
 
 Privacy-first, peer-to-peer audio baby monitor that runs entirely in the browser. No accounts, no servers storing your audio, no tracking.
 
-Built with [Next.js](https://nextjs.org) and bootstrapped with [v0](https://v0.app).
-
-[Continue working on v0](https://v0.app/chat/projects/prj_IqC0l3qnmvrYA28xMncaKeSfcfvn)
+Built with [Next.js](https://nextjs.org), bootstrapped with [v0](https://v0.dev) and [Claude Code](https://claude.ai/code).
 
 ## How It Works
 
@@ -123,4 +121,3 @@ Full [Privacy Policy](https://babymonitor.online/privacy) available on the site,
 
 MIT
 
-<a href="https://v0.app/chat/api/kiro/clone/rabin-a/v0-baby-monitor-web-app" alt="Open in Kiro"><img src="https://pdgvvgmkdvyeydso.public.blob.vercel-storage.com/open%20in%20kiro.svg?sanitize=true" /></a>

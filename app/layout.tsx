@@ -17,7 +17,7 @@ export const metadata: Metadata = {
     siteName: 'Baby Monitor',
     type: 'website',
   },
-  generator: 'v0.app',
+  generator: 'v0, Claude Code',
   icons: {
     icon: [
       {
