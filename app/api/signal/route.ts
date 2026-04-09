@@ -11,8 +11,14 @@ interface SessionData {
   ice?: SignalData[];
 }
 
-// In-memory store for signaling data
-const sessions = new Map<string, SessionData>();
+// Persist across HMR reloads in dev mode
+const globalForSignal = globalThis as typeof globalThis & {
+  __signalSessions?: Map<string, SessionData>;
+};
+if (!globalForSignal.__signalSessions) {
+  globalForSignal.__signalSessions = new Map<string, SessionData>();
+}
+const sessions = globalForSignal.__signalSessions;
 
 // Session expiry time (2 minutes)
 const SESSION_EXPIRY_MS = 2 * 60 * 1000;
