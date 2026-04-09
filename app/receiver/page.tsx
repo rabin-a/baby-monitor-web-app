@@ -14,8 +14,16 @@ function ReceiverContent() {
   const searchParams = useSearchParams();
   const sessionFromUrl = searchParams.get("session");
 
-  const { status, audioLevel, error, muted, connect, disconnect, toggleMute } =
-    useWebRTCReceiver();
+  const {
+    status,
+    audioLevel,
+    error,
+    muted,
+    sessionEnded,
+    connect,
+    disconnect,
+    toggleMute,
+  } = useWebRTCReceiver();
   const [sessionInput, setSessionInput] = useState("");
   const [lastSession, setLastSession] = useState<string | null>(null);
 
@@ -181,8 +189,23 @@ function ReceiverContent() {
           </div>
         )}
 
-        {/* Error State */}
-        {error && status === "error" && (
+        {/* Session ended by sender */}
+        {sessionEnded && status === "error" && (
+          <div className="flex flex-col items-center gap-6 w-full">
+            <div className="w-24 h-24 rounded-full bg-muted flex items-center justify-center">
+              <VolumeOff className="w-12 h-12 text-muted-foreground" />
+            </div>
+            <div className="p-4 bg-muted rounded-xl text-center w-full">
+              <p className="text-foreground font-medium">Session ended</p>
+              <p className="text-sm text-muted-foreground mt-1">
+                The monitoring session is no longer available
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* Error State (not session ended) */}
+        {error && status === "error" && !sessionEnded && (
           <div className="flex flex-col items-center gap-6 w-full">
             <StatusIndicator status={status} />
             <div className="p-4 bg-destructive/10 text-destructive rounded-xl text-sm text-center w-full">

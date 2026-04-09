@@ -60,6 +60,14 @@ async function setSession(
   }
 }
 
+async function deleteSession(sessionId: string): Promise<void> {
+  if (redis) {
+    await redis.del(`signal:${sessionId}`);
+  } else {
+    localSessions.delete(sessionId);
+  }
+}
+
 function getClientIp(request: NextRequest): string {
   return (
     request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
@@ -168,6 +176,11 @@ export async function POST(request: NextRequest) {
           }
         }
         break;
+      }
+
+      case "delete": {
+        await deleteSession(sessionId);
+        return NextResponse.json({ success: true });
       }
 
       default:

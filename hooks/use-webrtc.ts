@@ -89,6 +89,93 @@ export function useWebRTCSender() {
     [sessionId]
   );
 
+  // Create (or re-create) peer connection + offer, keeping same session & stream
+  const setupPeerConnection = useCallback(
+    async (sid: string) => {
+      const stream = streamRef.current;
+      if (!stream) return;
+
+      // Clean up old peer connection
+      if (peerConnectionRef.current) {
+        peerConnectionRef.current.close();
+        peerConnectionRef.current = null;
+      }
+      if (pollingRef.current) {
+        clearInterval(pollingRef.current);
+        pollingRef.current = null;
+      }
+
+      const pc = new RTCPeerConnection({ iceServers: STUN_SERVERS });
+      peerConnectionRef.current = pc;
+
+      stream.getAudioTracks().forEach((track) => {
+        pc.addTrack(track, stream);
+      });
+
+      const iceCandidates: RTCIceCandidate[] = [];
+      pc.onicecandidate = (event) => {
+        if (event.candidate) iceCandidates.push(event.candidate);
+      };
+
+      pc.onconnectionstatechange = () => {
+        if (pc.connectionState === "connected") {
+          setStatus("connected");
+          if (pollingRef.current) {
+            clearInterval(pollingRef.current);
+            pollingRef.current = null;
+          }
+        } else if (
+          pc.connectionState === "failed" ||
+          pc.connectionState === "disconnected"
+        ) {
+          // Receiver disconnected — go back to waiting and re-create offer
+          setStatus("waiting");
+          setupPeerConnection(sid);
+        }
+      };
+
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+
+      await new Promise<void>((resolve) => {
+        if (pc.iceGatheringState === "complete") {
+          resolve();
+        } else {
+          const timeout = setTimeout(() => resolve(), 5000);
+          pc.onicegatheringstatechange = () => {
+            if (pc.iceGatheringState === "complete") {
+              clearTimeout(timeout);
+              resolve();
+            }
+          };
+        }
+      });
+
+      await postSignal(
+        sid,
+        "offer",
+        JSON.stringify({ sdp: pc.localDescription, iceCandidates })
+      );
+
+      // Poll for answer
+      pollingRef.current = setInterval(async () => {
+        const data = await getSignal(sid, "answer");
+        if (data?.payload) {
+          const { sdp, iceCandidates: remoteIce } = JSON.parse(data.payload);
+          await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+          for (const candidate of remoteIce) {
+            await pc.addIceCandidate(new RTCIceCandidate(candidate));
+          }
+          if (pollingRef.current) {
+            clearInterval(pollingRef.current);
+            pollingRef.current = null;
+          }
+        }
+      }, 1000);
+    },
+    [updateAudioLevel]
+  );
+
   const start = useCallback(async () => {
     const newSessionId = Math.random().toString(36).substring(2, 10);
     setSessionId(newSessionId);
@@ -115,56 +202,8 @@ export function useWebRTCSender() {
       analyserRef.current = analyser;
       updateAudioLevel();
 
-      const pc = new RTCPeerConnection({ iceServers: STUN_SERVERS });
-      peerConnectionRef.current = pc;
-
-      stream.getAudioTracks().forEach((track) => {
-        pc.addTrack(track, stream);
-      });
-
-      const iceCandidates: RTCIceCandidate[] = [];
-      pc.onicecandidate = (event) => {
-        if (event.candidate) iceCandidates.push(event.candidate);
-      };
-
-      pc.onconnectionstatechange = () => {
-        if (pc.connectionState === "connected") {
-          setStatus("connected");
-          if (pollingRef.current) {
-            clearInterval(pollingRef.current);
-            pollingRef.current = null;
-          }
-        } else if (
-          pc.connectionState === "failed" ||
-          pc.connectionState === "disconnected"
-        ) {
-          setStatus("error");
-          setError("Connection lost");
-        }
-      };
-
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-
-      await new Promise<void>((resolve) => {
-        if (pc.iceGatheringState === "complete") {
-          resolve();
-        } else {
-          const timeout = setTimeout(() => resolve(), 5000);
-          pc.onicegatheringstatechange = () => {
-            if (pc.iceGatheringState === "complete") {
-              clearTimeout(timeout);
-              resolve();
-            }
-          };
-        }
-      });
-
-      await postSignal(
-        newSessionId,
-        "offer",
-        JSON.stringify({ sdp: pc.localDescription, iceCandidates })
-      );
+      // Set up peer connection and offer
+      await setupPeerConnection(newSessionId);
 
       // Poll for listeners
       listenerPollingRef.current = setInterval(async () => {
@@ -173,31 +212,20 @@ export function useWebRTCSender() {
           setListeners(data.listeners);
         }
       }, 2000);
-
-      // Poll for answer
-      pollingRef.current = setInterval(async () => {
-        const data = await getSignal(newSessionId, "answer");
-        if (data?.payload) {
-          const { sdp, iceCandidates: remoteIce } = JSON.parse(data.payload);
-          await pc.setRemoteDescription(new RTCSessionDescription(sdp));
-          for (const candidate of remoteIce) {
-            await pc.addIceCandidate(new RTCIceCandidate(candidate));
-          }
-          if (pollingRef.current) {
-            clearInterval(pollingRef.current);
-            pollingRef.current = null;
-          }
-        }
-      }, 1000);
     } catch (err) {
       setStatus("error");
       setError(
         err instanceof Error ? err.message : "Failed to start microphone"
       );
     }
-  }, [updateAudioLevel]);
+  }, [updateAudioLevel, setupPeerConnection]);
 
   const stop = useCallback(() => {
+    // Delete session from server so receiver knows it's gone
+    if (sessionId) {
+      postSignal(sessionId, "delete");
+    }
+
     if (animationRef.current) {
       cancelAnimationFrame(animationRef.current);
       animationRef.current = null;
@@ -226,7 +254,7 @@ export function useWebRTCSender() {
     setSessionId(null);
     setAudioLevel(0);
     setListeners([]);
-  }, []);
+  }, [sessionId]);
 
   useEffect(() => {
     return () => {
@@ -260,6 +288,8 @@ export function useWebRTCReceiver() {
   const analyserRef = useRef<AnalyserNode | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const animationRef = useRef<number | null>(null);
+  const sessionCheckRef = useRef<NodeJS.Timeout | null>(null);
+  const [sessionEnded, setSessionEnded] = useState(false);
 
   const updateAudioLevel = useCallback(() => {
     if (!analyserRef.current) return;
@@ -279,11 +309,35 @@ export function useWebRTCReceiver() {
     });
   }, []);
 
+  const cleanupConnection = useCallback(() => {
+    if (sessionCheckRef.current) {
+      clearInterval(sessionCheckRef.current);
+      sessionCheckRef.current = null;
+    }
+    if (animationRef.current) {
+      cancelAnimationFrame(animationRef.current);
+      animationRef.current = null;
+    }
+    if (audioContextRef.current) {
+      audioContextRef.current.close();
+      audioContextRef.current = null;
+    }
+    if (audioRef.current) {
+      audioRef.current.srcObject = null;
+      audioRef.current = null;
+    }
+    if (peerConnectionRef.current) {
+      peerConnectionRef.current.close();
+      peerConnectionRef.current = null;
+    }
+  }, []);
+
   const connect = useCallback(
     async (sessionId: string) => {
       try {
         setStatus("connecting");
         setError(null);
+        setSessionEnded(false);
 
         // Reuse listener ID from localStorage so reconnects are auto-approved
         const storageKey = `listener-${sessionId}`;
@@ -304,11 +358,16 @@ export function useWebRTCReceiver() {
             "approval",
             `&listenerId=${listenerId}`
           );
-          if (data?.status === "approved") {
+          if (!data) {
+            // Session deleted by sender
+            setSessionEnded(true);
+            throw new Error("Session ended by sender");
+          }
+          if (data.status === "approved") {
             approved = true;
             break;
           }
-          if (data?.status === "rejected") {
+          if (data.status === "rejected") {
             throw new Error("Connection rejected by sender");
           }
           await new Promise((r) => setTimeout(r, 1000));
@@ -360,7 +419,11 @@ export function useWebRTCReceiver() {
         let offerData: string | null = null;
         for (let i = 0; i < 10; i++) {
           const data = await getSignal(sessionId, "offer");
-          offerData = data?.payload ?? null;
+          if (!data) {
+            setSessionEnded(true);
+            throw new Error("Session ended by sender");
+          }
+          offerData = data.payload ?? null;
           if (offerData) break;
           await new Promise((r) => setTimeout(r, 1000));
         }
@@ -399,41 +462,46 @@ export function useWebRTCReceiver() {
           "answer",
           JSON.stringify({ sdp: pc.localDescription, iceCandidates })
         );
+
+        // Periodically check if session still exists
+        sessionCheckRef.current = setInterval(async () => {
+          const data = await getSignal(sessionId, "offer");
+          if (!data) {
+            cleanupConnection();
+            setSessionEnded(true);
+            setStatus("error");
+            setError("Monitoring session ended by sender");
+          }
+        }, 5000);
       } catch (err) {
         setStatus("error");
         setError(err instanceof Error ? err.message : "Failed to connect");
       }
     },
-    [updateAudioLevel]
+    [updateAudioLevel, cleanupConnection]
   );
 
   const disconnect = useCallback(() => {
-    if (animationRef.current) {
-      cancelAnimationFrame(animationRef.current);
-      animationRef.current = null;
-    }
-    if (audioContextRef.current) {
-      audioContextRef.current.close();
-      audioContextRef.current = null;
-    }
-    if (audioRef.current) {
-      audioRef.current.srcObject = null;
-      audioRef.current = null;
-    }
-    if (peerConnectionRef.current) {
-      peerConnectionRef.current.close();
-      peerConnectionRef.current = null;
-    }
+    cleanupConnection();
     setStatus("idle");
     setAudioLevel(0);
     setMuted(true);
-  }, []);
+  }, [cleanupConnection]);
 
   useEffect(() => {
     return () => {
-      disconnect();
+      cleanupConnection();
     };
-  }, [disconnect]);
+  }, [cleanupConnection]);
 
-  return { status, audioLevel, error, muted, connect, disconnect, toggleMute };
+  return {
+    status,
+    audioLevel,
+    error,
+    muted,
+    sessionEnded,
+    connect,
+    disconnect,
+    toggleMute,
+  };
 }
