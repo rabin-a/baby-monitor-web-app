@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { Redis } from "@upstash/redis";
 
 interface SignalData {
   payload: string;
@@ -11,30 +12,39 @@ interface SessionData {
   ice?: SignalData[];
 }
 
-// Persist across HMR reloads in dev mode
+// --- Storage layer: Redis when deployed, in-memory for local dev ---
+
+const redis =
+  process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN
+    ? new Redis({
+        url: process.env.UPSTASH_REDIS_REST_URL,
+        token: process.env.UPSTASH_REDIS_REST_TOKEN,
+      })
+    : null;
+
+// In-memory fallback for local dev (persists across HMR reloads)
 const globalForSignal = globalThis as typeof globalThis & {
   __signalSessions?: Map<string, SessionData>;
 };
 if (!globalForSignal.__signalSessions) {
   globalForSignal.__signalSessions = new Map<string, SessionData>();
 }
-const sessions = globalForSignal.__signalSessions;
+const localSessions = globalForSignal.__signalSessions;
 
-// Session expiry time (2 minutes)
-const SESSION_EXPIRY_MS = 2 * 60 * 1000;
+const SESSION_TTL_SECONDS = 120; // 2 minutes
 
-// Clean up expired sessions
-function cleanupExpiredSessions() {
-  const now = Date.now();
-  for (const [sessionId, data] of sessions.entries()) {
-    const lastActivity = Math.max(
-      data.offer?.timestamp ?? 0,
-      data.answer?.timestamp ?? 0,
-      ...(data.ice?.map((i) => i.timestamp) ?? [0])
-    );
-    if (now - lastActivity > SESSION_EXPIRY_MS) {
-      sessions.delete(sessionId);
-    }
+async function getSession(sessionId: string): Promise<SessionData | null> {
+  if (redis) {
+    return await redis.get<SessionData>(`signal:${sessionId}`);
+  }
+  return localSessions.get(sessionId) ?? null;
+}
+
+async function setSession(sessionId: string, data: SessionData): Promise<void> {
+  if (redis) {
+    await redis.set(`signal:${sessionId}`, data, { ex: SESSION_TTL_SECONDS });
+  } else {
+    localSessions.set(sessionId, data);
   }
 }
 
@@ -50,15 +60,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Clean up expired sessions
-    cleanupExpiredSessions();
-
-    // Get or create session
-    let session = sessions.get(sessionId);
-    if (!session) {
-      session = {};
-      sessions.set(sessionId, session);
-    }
+    const session = (await getSession(sessionId)) ?? {};
 
     const signalData: SignalData = {
       payload,
@@ -73,9 +75,7 @@ export async function POST(request: NextRequest) {
         session.answer = signalData;
         break;
       case "ice":
-        if (!session.ice) {
-          session.ice = [];
-        }
+        if (!session.ice) session.ice = [];
         session.ice.push(signalData);
         break;
       default:
@@ -85,6 +85,7 @@ export async function POST(request: NextRequest) {
         );
     }
 
+    await setSession(sessionId, session);
     return NextResponse.json({ success: true });
   } catch {
     return NextResponse.json(
@@ -106,10 +107,7 @@ export async function GET(request: NextRequest) {
     );
   }
 
-  // Clean up expired sessions
-  cleanupExpiredSessions();
-
-  const session = sessions.get(sessionId);
+  const session = await getSession(sessionId);
   if (!session) {
     return NextResponse.json(
       { error: "Session not found" },
@@ -127,7 +125,9 @@ export async function GET(request: NextRequest) {
       payload = session.answer?.payload ?? null;
       break;
     case "ice":
-      payload = session.ice ? JSON.stringify(session.ice.map((i) => i.payload)) : null;
+      payload = session.ice
+        ? JSON.stringify(session.ice.map((i) => i.payload))
+        : null;
       break;
     default:
       return NextResponse.json(
