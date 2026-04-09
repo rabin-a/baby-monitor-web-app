@@ -285,8 +285,13 @@ export function useWebRTCReceiver() {
         setStatus("connecting");
         setError(null);
 
-        // Generate a listener ID
-        const listenerId = Math.random().toString(36).substring(2, 10);
+        // Reuse listener ID from localStorage so reconnects are auto-approved
+        const storageKey = `listener-${sessionId}`;
+        let listenerId = localStorage.getItem(storageKey);
+        if (!listenerId) {
+          listenerId = Math.random().toString(36).substring(2, 10);
+          localStorage.setItem(storageKey, listenerId);
+        }
 
         // Send listen request so sender can see us
         await postSignal(sessionId, "listen-request", listenerId);

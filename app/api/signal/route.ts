@@ -19,6 +19,7 @@ interface SessionData {
   answer?: SignalData;
   ice?: SignalData[];
   listeners?: ListenerInfo[];
+  locked?: boolean; // true after first approval — no new listeners accepted
 }
 
 // --- Storage layer ---
@@ -117,17 +118,36 @@ export async function POST(request: NextRequest) {
         const listenerId =
           payload || Math.random().toString(36).substring(2, 10);
         if (!session.listeners) session.listeners = [];
-        // Avoid duplicate requests from same listener
+
         const existing = session.listeners.find((l) => l.id === listenerId);
-        if (!existing) {
+        if (existing) {
+          // Same listener reconnecting — auto-approve if previously approved
+          if (existing.status === "approved") {
+            // Clear old answer so fresh WebRTC handshake can happen
+            session.answer = undefined;
+          }
+          break;
+        }
+
+        // Session is locked after first approval — reject new listeners
+        if (session.locked) {
           session.listeners.push({
             id: listenerId,
             ip,
             device: parseDevice(ua),
             timestamp: Date.now(),
-            status: "pending",
+            status: "rejected",
           });
+          break;
         }
+
+        session.listeners.push({
+          id: listenerId,
+          ip,
+          device: parseDevice(ua),
+          timestamp: Date.now(),
+          status: "pending",
+        });
         break;
       }
 
@@ -143,6 +163,9 @@ export async function POST(request: NextRequest) {
         const listener = session.listeners.find((l) => l.id === listenerId);
         if (listener) {
           listener.status = type === "approve" ? "approved" : "rejected";
+          if (type === "approve") {
+            session.locked = true; // Lock session — no new listeners
+          }
         }
         break;
       }
