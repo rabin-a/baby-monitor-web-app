@@ -1,21 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Baby Monitor AI - local bridge using Anthropic SDK for audio analysis.
+Baby Monitor AI - local bridge using Claude Code CLI for audio analysis.
 
-Runs a small HTTP server that receives audio from the baby monitor
-receiver page and sends it to Claude for classification.
+Converts audio to a spectrogram image, then uses claude CLI to
+visually analyze it (Claude can read images via the Read tool).
 
 Usage:
-    pip install anthropic
     python3 baby-monitor-ai.py
 
-The script uses your ANTHROPIC_API_KEY env var, or falls back to
-the Claude Code CLI's API key if available.
-
 Requires:
-    - pip install anthropic
-    - ANTHROPIC_API_KEY set (or Claude Code installed)
+    - Claude Code CLI (claude command)
+    - ffmpeg (brew install ffmpeg)
     - Same network as the baby monitor sender
 """
 
@@ -23,24 +19,18 @@ import argparse
 import json
 import base64
 import os
+import subprocess
 import sys
 import shutil
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
-try:
-    import anthropic
-except ImportError:
-    print("Error: 'anthropic' package not found.")
-    print("  pip install anthropic")
-    sys.exit(1)
-
 DEFAULT_PORT = 9877
+WORK_DIR = "/tmp/baby-monitor"
 
 
 class BridgeHandler(BaseHTTPRequestHandler):
     monitoring_mode = "notify_crying"
-    client = None
 
     def log_message(self, format, *args):
         print(f"[baby-monitor-ai] {args[0]}")
@@ -96,48 +86,99 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 self._respond(400, {"error": "No audio data"})
                 return
 
-            media_type = "audio/webm"
-            if "wav" in content_type:
-                media_type = "audio/wav"
-            elif "ogg" in content_type:
-                media_type = "audio/ogg"
-            elif "mp3" in content_type or "mpeg" in content_type:
-                media_type = "audio/mp3"
+            suffix = ".webm" if "webm" in content_type else ".wav"
+            audio_path = os.path.join(WORK_DIR, f"capture{suffix}")
+            spectrogram_path = os.path.join(WORK_DIR, "spectrogram.png")
 
-            audio_bytes = base64.b64decode(audio_b64)
-            print(f"[baby-monitor-ai] Analyzing {len(audio_bytes)} bytes ({media_type})...")
+            # Save audio
+            os.makedirs(WORK_DIR, exist_ok=True)
+            with open(audio_path, "wb") as f:
+                f.write(base64.b64decode(audio_b64))
 
-            prompt = (
-                f"Monitoring mode: {BridgeHandler.monitoring_mode}. "
-                "Classify what you hear from this baby monitor audio. "
-                'Respond with ONLY a JSON object: '
-                '{"status": "sleeping"|"crying"|"fussing"|"babbling"|"coughing"|"noise", '
-                '"confidence": "high"|"medium"|"low", '
-                '"description": "brief one-line description"}'
+            size = os.path.getsize(audio_path)
+            print(f"[baby-monitor-ai] Saved {size} bytes to {audio_path}")
+
+            # Convert to spectrogram image using ffmpeg
+            print("[baby-monitor-ai] Generating spectrogram...")
+            ffmpeg_result = subprocess.run(
+                [
+                    "ffmpeg", "-y", "-i", audio_path,
+                    "-lavfi", "showspectrumpic=s=800x400:mode=combined",
+                    spectrogram_path,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
 
-            response = BridgeHandler.client.messages.create(
-                model="claude-sonnet-4-20250514",
-                max_tokens=200,
-                messages=[{
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {
-                            "type": "document",
-                            "source": {
-                                "type": "base64",
-                                "media_type": media_type,
-                                "data": audio_b64,
-                            },
-                        },
-                    ],
-                }],
-            )
+            if ffmpeg_result.returncode != 0 or not os.path.exists(spectrogram_path):
+                # Fallback: get audio stats as text
+                print("[baby-monitor-ai] Spectrogram failed, using volume stats...")
+                stats_result = subprocess.run(
+                    ["ffmpeg", "-i", audio_path, "-af", "volumedetect", "-f", "null", "-"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                audio_info = stats_result.stderr[-500:] if stats_result.stderr else "No stats available"
 
-            output = response.content[0].text.strip()
-            print(f"[baby-monitor-ai] Result: {output}")
+                prompt = (
+                    f"You are a baby monitor AI. Monitoring mode: {BridgeHandler.monitoring_mode}. "
+                    f"Here are volume statistics from a baby monitor audio recording:\n\n{audio_info}\n\n"
+                    "Based on these volume levels, classify the audio. "
+                    'Respond with ONLY a JSON object: '
+                    '{"status": "sleeping"|"crying"|"fussing"|"babbling"|"coughing"|"noise", '
+                    '"confidence": "high"|"medium"|"low", '
+                    '"description": "brief one-line description"}'
+                )
 
+                result = subprocess.run(
+                    ["claude", "-p", prompt, "--allowedTools", ""],
+                    capture_output=True, text=True, timeout=30,
+                )
+            else:
+                print(f"[baby-monitor-ai] Spectrogram: {spectrogram_path}")
+
+                # Also get volume stats for extra context
+                stats_result = subprocess.run(
+                    ["ffmpeg", "-i", audio_path, "-af", "volumedetect", "-f", "null", "-"],
+                    capture_output=True, text=True, timeout=10,
+                )
+                volume_info = ""
+                if stats_result.stderr:
+                    for line in stats_result.stderr.split("\n"):
+                        if "mean_volume" in line or "max_volume" in line:
+                            volume_info += line.strip() + " "
+
+                prompt = (
+                    f"Read the spectrogram image at {spectrogram_path}. "
+                    f"This is from a baby monitor. Mode: {BridgeHandler.monitoring_mode}. "
+                    f"{('Volume info: ' + volume_info) if volume_info else ''} "
+                    "The spectrogram shows frequency (vertical) over time (horizontal). "
+                    "Baby crying shows as bright horizontal bands in 300-600Hz range with harmonics. "
+                    "Silence is dark. Background noise is diffuse low-frequency energy. "
+                    'Respond with ONLY a JSON object: '
+                    '{"status": "sleeping"|"crying"|"fussing"|"babbling"|"coughing"|"noise", '
+                    '"confidence": "high"|"medium"|"low", '
+                    '"description": "brief one-line description"}'
+                )
+
+                result = subprocess.run(
+                    ["claude", "-p", prompt, "--allowedTools", "Read"],
+                    capture_output=True, text=True, timeout=30,
+                )
+
+            output = result.stdout.strip()
+            print(f"[baby-monitor-ai] Claude: {output[:200]}")
+
+            # Clean up
+            for f in [audio_path, spectrogram_path]:
+                try:
+                    os.unlink(f)
+                except OSError:
+                    pass
+
+            # Parse JSON
             try:
                 start = output.index("{")
                 end = output.rindex("}") + 1
@@ -151,6 +192,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
             self._respond(200, analysis)
 
+        except subprocess.TimeoutExpired:
+            print("[baby-monitor-ai] Timed out")
+            self._respond(500, {"error": "Analysis timed out"})
         except Exception as e:
             print(f"[baby-monitor-ai] Error: {e}")
             self._respond(500, {"error": str(e)})
@@ -161,37 +205,30 @@ def main():
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     args = parser.parse_args()
 
-    # Try to get API key
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-
-    if not api_key:
-        # Try to read from Claude Code config
-        config_path = os.path.expanduser("~/.claude/.credentials")
-        if os.path.exists(config_path):
-            try:
-                with open(config_path) as f:
-                    creds = json.load(f)
-                    api_key = creds.get("apiKey") or creds.get("api_key")
-            except Exception:
-                pass
-
-    if not api_key:
-        print("Error: No API key found.")
-        print("  Set ANTHROPIC_API_KEY or install Claude Code (claude login)")
+    if not shutil.which("claude"):
+        print("Error: 'claude' CLI not found.")
+        print("  npm install -g @anthropic-ai/claude-code")
         sys.exit(1)
 
-    BridgeHandler.client = anthropic.Anthropic(api_key=api_key)
+    if not shutil.which("ffmpeg"):
+        print("Error: 'ffmpeg' not found.")
+        print("  brew install ffmpeg")
+        sys.exit(1)
+
+    os.makedirs(WORK_DIR, exist_ok=True)
 
     server = HTTPServer(("0.0.0.0", args.port), BridgeHandler)
-    print(f"[baby-monitor-ai] Running on http://0.0.0.0:{args.port}")
-    print(f"[baby-monitor-ai] Mode: {BridgeHandler.monitoring_mode}")
-    print(f"[baby-monitor-ai] Open babymonitor.online/receiver to connect")
-    print(f"[baby-monitor-ai] Press Ctrl+C to stop")
+    print("[baby-monitor-ai] Running on http://0.0.0.0:%d" % args.port)
+    print("[baby-monitor-ai] Mode: %s" % BridgeHandler.monitoring_mode)
+    print("[baby-monitor-ai] Using: claude CLI + ffmpeg spectrogram")
+    print("[baby-monitor-ai] Open babymonitor.online/receiver to connect")
+    print("[baby-monitor-ai] Press Ctrl+C to stop")
 
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         print("\n[baby-monitor-ai] Stopped")
+        shutil.rmtree(WORK_DIR, ignore_errors=True)
         server.server_close()
 
 
