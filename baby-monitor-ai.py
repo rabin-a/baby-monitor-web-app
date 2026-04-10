@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Baby Monitor AI - local bridge using Claude API for audio analysis.
+Baby Monitor AI - local bridge using Claude Code CLI for audio analysis.
 
 Runs a small HTTP server that receives audio from the baby monitor
-receiver page and sends it to Claude for classification.
+receiver page, saves it to /tmp/baby-monitor/, and pipes it to
+claude CLI for classification.
 
 Usage:
-    pip install anthropic
     python3 baby-monitor-ai.py
 
 Requires:
-    - ANTHROPIC_API_KEY environment variable set
+    - Claude Code CLI installed (claude command available)
     - Same network as the baby monitor sender
 """
 
@@ -19,23 +19,18 @@ import argparse
 import json
 import base64
 import os
+import subprocess
 import sys
+import shutil
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
-try:
-    import anthropic
-except ImportError:
-    print("Error: 'anthropic' package not found.")
-    print("  pip install anthropic")
-    sys.exit(1)
-
 DEFAULT_PORT = 9877
+AUDIO_DIR = "/tmp/baby-monitor"
 
 
 class BridgeHandler(BaseHTTPRequestHandler):
     monitoring_mode = "notify_crying"
-    client = None
 
     def log_message(self, format, *args):
         print(f"[baby-monitor-ai] {args[0]}")
@@ -91,53 +86,45 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 self._respond(400, {"error": "No audio data"})
                 return
 
-            # Determine media type for Claude API
-            media_type = "audio/webm"
-            if "wav" in content_type:
-                media_type = "audio/wav"
-            elif "ogg" in content_type:
-                media_type = "audio/ogg"
-            elif "mp3" in content_type or "mpeg" in content_type:
-                media_type = "audio/mp3"
+            suffix = ".webm" if "webm" in content_type else ".wav"
+            audio_path = os.path.join(AUDIO_DIR, f"capture{suffix}")
 
-            print(f"[baby-monitor-ai] Analyzing {len(audio_b64)} bytes of audio...")
+            # Write audio to /tmp/baby-monitor/
+            os.makedirs(AUDIO_DIR, exist_ok=True)
+            with open(audio_path, "wb") as f:
+                f.write(base64.b64decode(audio_b64))
+
+            print(f"[baby-monitor-ai] Saved {os.path.getsize(audio_path)} bytes to {audio_path}")
 
             prompt = (
-                f"Monitoring mode: {BridgeHandler.monitoring_mode}. "
-                "Classify what you hear from this baby monitor. "
+                f"I have a baby monitor audio recording at {audio_path}. "
+                f"Read this file. Monitoring mode: {BridgeHandler.monitoring_mode}. "
+                "Classify what you hear. "
                 'Respond with ONLY a JSON object: '
                 '{"status": "sleeping"|"crying"|"fussing"|"babbling"|"coughing"|"noise", '
                 '"confidence": "high"|"medium"|"low", '
                 '"description": "brief one-line description"}'
             )
 
-            response = BridgeHandler.client.messages.create(
-                model="claude-sonnet-4-20250514",
-                max_tokens=200,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": prompt,
-                            },
-                            {
-                                "type": "document",
-                                "source": {
-                                    "type": "base64",
-                                    "media_type": media_type,
-                                    "data": audio_b64,
-                                },
-                            },
-                        ],
-                    }
-                ],
+            print(f"[baby-monitor-ai] Calling claude CLI...")
+
+            result = subprocess.run(
+                ["claude", "-p", prompt, "--allowedTools", "Read"],
+                capture_output=True,
+                text=True,
+                timeout=30,
             )
 
-            output = response.content[0].text.strip()
-            print(f"[baby-monitor-ai] Result: {output}")
+            output = result.stdout.strip()
+            print(f"[baby-monitor-ai] Claude: {output[:200]}")
 
+            # Clean up audio file
+            try:
+                os.unlink(audio_path)
+            except OSError:
+                pass
+
+            # Parse JSON from output
             try:
                 start = output.index("{")
                 end = output.rindex("}") + 1
@@ -151,9 +138,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
             self._respond(200, analysis)
 
-        except anthropic.APIError as e:
-            print(f"[baby-monitor-ai] API error: {e}")
-            self._respond(500, {"error": f"Claude API error: {str(e)}"})
+        except subprocess.TimeoutExpired:
+            print("[baby-monitor-ai] Claude CLI timed out")
+            self._respond(500, {"error": "Analysis timed out"})
         except Exception as e:
             print(f"[baby-monitor-ai] Error: {e}")
             self._respond(500, {"error": str(e)})
@@ -164,17 +151,18 @@ def main():
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     args = parser.parse_args()
 
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        print("Error: ANTHROPIC_API_KEY environment variable not set.")
-        print("  export ANTHROPIC_API_KEY=sk-ant-...")
+    # Check claude CLI is available
+    if not shutil.which("claude"):
+        print("Error: 'claude' CLI not found. Install Claude Code first.")
+        print("  npm install -g @anthropic-ai/claude-code")
         sys.exit(1)
 
-    BridgeHandler.client = anthropic.Anthropic(api_key=api_key)
-    print(f"[baby-monitor-ai] Claude API connected")
+    # Create audio dir
+    os.makedirs(AUDIO_DIR, exist_ok=True)
 
     server = HTTPServer(("0.0.0.0", args.port), BridgeHandler)
     print(f"[baby-monitor-ai] Running on http://0.0.0.0:{args.port}")
+    print(f"[baby-monitor-ai] Audio dir: {AUDIO_DIR}")
     print(f"[baby-monitor-ai] Mode: {BridgeHandler.monitoring_mode}")
     print(f"[baby-monitor-ai] Open babymonitor.online/receiver to connect")
     print(f"[baby-monitor-ai] Press Ctrl+C to stop")
@@ -183,6 +171,8 @@ def main():
         server.serve_forever()
     except KeyboardInterrupt:
         print("\n[baby-monitor-ai] Stopped")
+        # Clean up audio dir
+        shutil.rmtree(AUDIO_DIR, ignore_errors=True)
         server.server_close()
 
 
