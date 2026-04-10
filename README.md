@@ -1,6 +1,12 @@
-# Baby Monitor
+<p align="center">
+  <img src="public/icon-512x512.png" alt="Baby Monitor" width="120" height="120" />
+</p>
 
-**[babymonitor.online](https://babymonitor.online)**
+<h1 align="center">Baby Monitor</h1>
+
+<p align="center">
+  <strong><a href="https://babymonitor.online">babymonitor.online</a></strong>
+</p>
 
 Privacy-first, peer-to-peer audio baby monitor that runs entirely in the browser. No accounts, no servers storing your audio, no tracking.
 
