@@ -216,7 +216,7 @@ export function useWebRTCSender() {
     }, 1000);
   });
 
-  const start = useCallback(async (networkOnly = true) => {
+  const start = useCallback(async (networkOnly = true, babyName?: string, pin?: string) => {
     const newSessionId = Math.random().toString(36).substring(2, 10);
     sessionIdRef.current = newSessionId;
     setSessionId(newSessionId);
@@ -245,9 +245,16 @@ export function useWebRTCSender() {
 
       await createOffer.current(newSessionId);
 
-      // Store network restriction on the session
+      // Store network restriction and metadata
       if (networkOnly) {
         await postSignal(newSessionId, "network-only");
+      }
+      if (babyName || pin) {
+        await postSignal(
+          newSessionId,
+          "set-metadata",
+          JSON.stringify({ babyName, pin })
+        );
       }
 
       // Poll for listeners
@@ -388,7 +395,7 @@ export function useWebRTCReceiver() {
   }, []);
 
   const connect = useCallback(
-    async (sessionId: string) => {
+    async (sessionId: string, pin?: string) => {
       try {
         setStatus("connecting");
         setError(null);
@@ -408,7 +415,9 @@ export function useWebRTCReceiver() {
           localStorage.setItem(storageKey, listenerId);
         }
 
-        await postSignal(sessionId, "listen-request", listenerId);
+        // Send listenerId:pin so server can validate
+        const listenPayload = pin ? `${listenerId}:${pin}` : listenerId;
+        await postSignal(sessionId, "listen-request", listenPayload);
 
         if (!isReconnect) {
           let approved = false;

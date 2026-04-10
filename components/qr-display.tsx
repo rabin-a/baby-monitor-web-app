@@ -11,10 +11,11 @@ import { Check, Copy } from "lucide-react";
 interface QRDisplayProps {
   url: string;
   status?: ConnectionStatus;
+  babyName?: string;
   className?: string;
 }
 
-export function QRDisplay({ url, status, className }: QRDisplayProps) {
+export function QRDisplay({ url, status, babyName, className }: QRDisplayProps) {
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
@@ -41,6 +42,9 @@ export function QRDisplay({ url, status, className }: QRDisplayProps) {
       )}
     >
       <div className="p-6 bg-card rounded-3xl shadow-lg shadow-primary/5 border border-border/50 w-full flex flex-col items-center">
+        {babyName && (
+          <p className="text-lg font-bold text-foreground mb-1">{babyName}</p>
+        )}
         {status && (
           <div className="mb-4">
             <StatusIndicator status={status} />

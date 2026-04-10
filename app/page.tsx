@@ -2,17 +2,20 @@
 
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { StatusIndicator } from "@/components/status-indicator";
 import { AudioWaveform } from "@/components/audio-waveform";
 import { QRDisplay } from "@/components/qr-display";
 import { useWebRTCSender } from "@/hooks/use-webrtc";
 import type { ListenerInfo } from "@/hooks/use-webrtc";
+import Link from "next/link";
 import {
   Baby,
   Check,
   Globe,
   Mic,
   MicOff,
+  Radar,
   Smartphone,
   Square,
   Users,
@@ -36,6 +39,13 @@ export default function HomePage() {
   const [receiverUrl, setReceiverUrl] = useState<string | null>(null);
   const [localIp, setLocalIp] = useState<string | null>(null);
   const [networkOnly, setNetworkOnly] = useState(true);
+  const [babyName, setBabyName] = useState(() =>
+    typeof window !== "undefined"
+      ? localStorage.getItem("babymonitor-name") || ""
+      : ""
+  );
+  const [pin, setPin] = useState("");
+  const [showPin, setShowPin] = useState(false);
 
   useEffect(() => {
     const hostname = window.location.hostname;
@@ -129,14 +139,107 @@ export default function HomePage() {
                 : "Any device with the link can request to connect"}
             </p>
 
+            {/* Baby name — optional, remembered */}
+            <Input
+              type="text"
+              placeholder="Baby name (optional, e.g., Emma's Room)"
+              value={babyName}
+              onChange={(e) => {
+                setBabyName(e.target.value);
+                localStorage.setItem("babymonitor-name", e.target.value);
+              }}
+              className="h-12 rounded-2xl border-border/50 shadow-sm"
+            />
+
+            {/* Optional PIN toggle + input */}
+            {!showPin ? (
+              <button
+                onClick={() => setShowPin(true)}
+                className="text-xs text-primary font-medium hover:underline"
+              >
+                + Add a PIN for extra security
+              </button>
+            ) : (
+              <div className="flex flex-col gap-2">
+                <p className="text-xs text-muted-foreground text-center">
+                  Enter a 4-digit PIN (required to connect)
+                </p>
+                <div className="flex justify-center gap-3">
+                  {[0, 1, 2, 3].map((i) => (
+                    <input
+                      key={i}
+                      type="text"
+                      inputMode="numeric"
+                      maxLength={1}
+                      value={pin[i] || ""}
+                      onChange={(e) => {
+                        const digit = e.target.value.replace(/\D/g, "");
+                        const newPin = pin.split("");
+                        newPin[i] = digit;
+                        setPin(newPin.join("").slice(0, 4));
+                        if (digit && i < 3) {
+                          const next = e.target
+                            .parentElement?.children[i + 1] as HTMLInputElement;
+                          next?.focus();
+                        }
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Backspace" && !pin[i] && i > 0) {
+                          const prev = (e.target as HTMLElement)
+                            .parentElement?.children[i - 1] as HTMLInputElement;
+                          prev?.focus();
+                        }
+                      }}
+                      className="w-14 h-14 text-center text-2xl font-bold rounded-2xl border border-border/50 bg-card shadow-sm focus:border-primary focus:ring-2 focus:ring-primary/20 outline-none transition-all"
+                    />
+                  ))}
+                </div>
+                <button
+                  onClick={() => {
+                    setShowPin(false);
+                    setPin("");
+                  }}
+                  className="text-xs text-muted-foreground hover:underline"
+                >
+                  Remove PIN
+                </button>
+              </div>
+            )}
+
             <Button
               size="lg"
-              onClick={() => start(networkOnly)}
+              onClick={() =>
+                start(
+                  networkOnly,
+                  babyName.trim() || undefined,
+                  showPin && pin.length === 4 ? pin : undefined
+                )
+              }
+              disabled={showPin && pin.length !== 4}
               className="group w-full h-16 text-lg rounded-3xl gap-3 bg-gradient-to-r from-primary to-primary/80 hover:from-primary/90 hover:to-primary/70 shadow-lg shadow-primary/25 active:scale-[0.98] transition-all duration-200"
             >
               <Mic className="w-6 h-6 group-hover:scale-110 transition-transform" />
               Start Monitoring
             </Button>
+
+            {/* Divider */}
+            <div className="flex items-center gap-3 w-full">
+              <div className="flex-1 h-px bg-border/50" />
+              <span className="text-xs text-muted-foreground">or</span>
+              <div className="flex-1 h-px bg-border/50" />
+            </div>
+
+            {/* Find nearby monitors */}
+            <Link href="/receiver" className="w-full">
+              <Button
+                variant="outline"
+                size="lg"
+                className="w-full h-14 rounded-3xl text-lg gap-2"
+              >
+                <Radar className="w-5 h-5" />
+                Find nearby monitors
+              </Button>
+            </Link>
           </div>
         )}
 
@@ -144,7 +247,7 @@ export default function HomePage() {
         {(status === "waiting" || status === "connected") && (
           <div className="flex flex-col items-center gap-6 w-full animate-fade-in-up">
             {status === "waiting" && receiverUrl && (
-              <QRDisplay url={receiverUrl} status="waiting" />
+              <QRDisplay url={receiverUrl} status="waiting" babyName={babyName.trim() || undefined} />
             )}
 
             {status === "connected" && (

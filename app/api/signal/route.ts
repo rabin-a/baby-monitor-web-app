@@ -22,6 +22,8 @@ interface SessionData {
   locked?: boolean;
   senderIp?: string;
   networkOnly?: boolean;
+  babyName?: string;
+  pin?: string;
 }
 
 // --- Storage layer ---
@@ -64,10 +66,50 @@ async function setSession(
 
 async function deleteSession(sessionId: string): Promise<void> {
   if (redis) {
+    // Remove from discovery index
+    const session = await getSession(sessionId);
+    if (session?.senderIp) {
+      await redis.srem(`discover:${session.senderIp}`, sessionId);
+    }
     await redis.del(`signal:${sessionId}`);
   } else {
     localSessions.delete(sessionId);
   }
+}
+
+async function addToDiscoveryIndex(
+  senderIp: string,
+  sessionId: string
+): Promise<void> {
+  if (redis) {
+    await redis.sadd(`discover:${senderIp}`, sessionId);
+    await redis.expire(`discover:${senderIp}`, SESSION_TTL_SECONDS);
+  }
+  // In-memory: no index needed, we iterate the Map
+}
+
+async function getDiscoverableSessions(
+  ip: string
+): Promise<{ sessionId: string; babyName: string }[]> {
+  const results: { sessionId: string; babyName: string }[] = [];
+
+  if (redis) {
+    const sessionIds = await redis.smembers(`discover:${ip}`);
+    for (const sid of sessionIds) {
+      const session = await getSession(sid as string);
+      if (session?.networkOnly && session.senderIp === ip && session.babyName) {
+        results.push({ sessionId: sid as string, babyName: session.babyName });
+      }
+    }
+  } else {
+    for (const [sid, session] of localSessions.entries()) {
+      if (session.networkOnly && session.senderIp === ip && session.babyName) {
+        results.push({ sessionId: sid, babyName: session.babyName });
+      }
+    }
+  }
+
+  return results;
 }
 
 function getClientIp(request: NextRequest): string {
@@ -129,21 +171,48 @@ export async function POST(request: NextRequest) {
         break;
       }
 
+      case "set-metadata": {
+        const meta = payload ? JSON.parse(payload) : {};
+        if (meta.babyName) session.babyName = meta.babyName;
+        if (meta.pin) session.pin = meta.pin;
+        // Add to discovery index if networkOnly
+        if (session.networkOnly && session.senderIp && session.babyName) {
+          await addToDiscoveryIndex(session.senderIp, sessionId);
+        }
+        break;
+      }
+
       case "listen-request": {
         const ip = getClientIp(request);
         const ua = request.headers.get("user-agent") || "";
-        const listenerId =
-          payload || Math.random().toString(36).substring(2, 10);
+
+        // Parse payload: "listenerId" or "listenerId:pin"
+        const parts = (payload || "").split(":");
+        const listenerId = parts[0] || Math.random().toString(36).substring(2, 10);
+        const submittedPin = parts[1] || "";
+
         if (!session.listeners) session.listeners = [];
 
-        // Network restriction: if sender enabled "same network only",
-        // reject silently (receiver sees "session not found")
+        // Network restriction
         if (session.networkOnly && session.senderIp && ip !== session.senderIp) {
           await setSession(sessionId, session);
           return NextResponse.json(
             { error: "Session not found" },
             { status: 404 }
           );
+        }
+
+        // PIN check — wrong PIN returns 404 (don't reveal session exists)
+        if (session.pin && session.pin !== submittedPin) {
+          // Allow previously approved listeners to reconnect without PIN
+          const existing = session.listeners.find((l) => l.id === listenerId);
+          if (!existing || existing.status !== "approved") {
+            await setSession(sessionId, session);
+            return NextResponse.json(
+              { error: "Session not found" },
+              { status: 404 }
+            );
+          }
         }
 
         const existing = session.listeners.find((l) => l.id === listenerId);
@@ -188,7 +257,7 @@ export async function POST(request: NextRequest) {
         if (listener) {
           listener.status = type === "approve" ? "approved" : "rejected";
           if (type === "approve") {
-            session.locked = true; // Lock session — no new listeners
+            session.locked = true;
           }
         }
         break;
@@ -221,9 +290,23 @@ export async function GET(request: NextRequest) {
   const sessionId = searchParams.get("sessionId");
   const type = searchParams.get("type");
 
-  if (!sessionId || !type) {
+  if (!type) {
     return NextResponse.json(
       { error: "Missing required parameters" },
+      { status: 400 }
+    );
+  }
+
+  // Discovery endpoint — no sessionId needed
+  if (type === "discover") {
+    const clientIp = getClientIp(request);
+    const sessions = await getDiscoverableSessions(clientIp);
+    return NextResponse.json({ sessions });
+  }
+
+  if (!sessionId) {
+    return NextResponse.json(
+      { error: "Missing sessionId" },
       { status: 400 }
     );
   }

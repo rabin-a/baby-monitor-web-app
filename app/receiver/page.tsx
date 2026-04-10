@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, Suspense } from "react";
+import { useState, useCallback, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
@@ -10,11 +10,18 @@ import { AudioWaveform } from "@/components/audio-waveform";
 import { useWebRTCReceiver } from "@/hooks/use-webrtc";
 import {
   ArrowLeft,
+  Baby,
   Headphones,
   Link as LinkIcon,
+  Radar,
   Volume2,
   VolumeOff,
 } from "lucide-react";
+
+interface DiscoveredMonitor {
+  sessionId: string;
+  babyName: string;
+}
 
 function ReceiverContent() {
   const searchParams = useSearchParams();
@@ -33,19 +40,51 @@ function ReceiverContent() {
   const [sessionInput, setSessionInput] = useState("");
   const [lastSession, setLastSession] = useState<string | null>(null);
 
-  const handleConnect = () => {
-    const session = sessionFromUrl || lastSession;
-    if (session) {
-      setLastSession(session);
-      connect(session);
-    } else {
-      let sessionId = sessionInput.trim();
-      const urlMatch = sessionId.match(/session=([a-zA-Z0-9]+)/);
-      if (urlMatch) sessionId = urlMatch[1];
-      if (sessionId) {
-        setLastSession(sessionId);
-        connect(sessionId);
+  // Discovery state
+  const [discovering, setDiscovering] = useState(false);
+  const [discovered, setDiscovered] = useState<DiscoveredMonitor[] | null>(
+    null
+  );
+  const [selectedSession, setSelectedSession] = useState<string | null>(null);
+  const [pinInput, setPinInput] = useState("");
+
+  const handleConnect = useCallback(
+    (sid?: string, pin?: string) => {
+      const session = sid || sessionFromUrl || lastSession;
+      if (session) {
+        setLastSession(session);
+        connect(session, pin || undefined);
+      } else {
+        let sessionId = sessionInput.trim();
+        const urlMatch = sessionId.match(/session=([a-zA-Z0-9]+)/);
+        if (urlMatch) sessionId = urlMatch[1];
+        if (sessionId) {
+          setLastSession(sessionId);
+          connect(sessionId, pin || undefined);
+        }
       }
+    },
+    [sessionFromUrl, lastSession, sessionInput, connect]
+  );
+
+  const handleDiscover = async () => {
+    setDiscovering(true);
+    setDiscovered(null);
+    try {
+      const res = await fetch("/api/signal?type=discover");
+      const data = await res.json();
+      setDiscovered(data.sessions ?? []);
+    } catch {
+      setDiscovered([]);
+    }
+    setDiscovering(false);
+  };
+
+  const handlePinSubmit = () => {
+    if (selectedSession && pinInput.length === 4) {
+      handleConnect(selectedSession, pinInput);
+      setSelectedSession(null);
+      setPinInput("");
     }
   };
 
@@ -73,7 +112,7 @@ function ReceiverContent() {
       {/* Main Content */}
       <div className="flex-1 flex flex-col items-center justify-center gap-8 max-w-md mx-auto w-full">
         {/* Idle — has session: show connect/reconnect */}
-        {status === "idle" && hasSession && (
+        {status === "idle" && hasSession && !selectedSession && (
           <div className="flex flex-col items-center gap-6 w-full animate-fade-in-up">
             <div className="w-24 h-24 rounded-full bg-gradient-to-br from-primary/15 to-warm-amber/10 flex items-center justify-center shadow-lg shadow-primary/10 animate-glow-pulse">
               <Headphones className="w-12 h-12 text-primary" />
@@ -85,7 +124,7 @@ function ReceiverContent() {
             </p>
             <Button
               size="lg"
-              onClick={handleConnect}
+              onClick={() => handleConnect()}
               className="group w-full h-16 text-lg rounded-3xl gap-3 bg-gradient-to-r from-primary to-primary/80 hover:from-primary/90 hover:to-primary/70 shadow-lg shadow-primary/25 active:scale-[0.98] transition-all duration-200"
             >
               <Headphones className="w-6 h-6 group-hover:scale-110 transition-transform" />
@@ -94,15 +133,74 @@ function ReceiverContent() {
           </div>
         )}
 
-        {/* Idle — no session: show manual input */}
-        {status === "idle" && !hasSession && (
+        {/* Idle — no session: show discover + manual input */}
+        {status === "idle" && !hasSession && !selectedSession && (
           <div className="flex flex-col items-center gap-6 w-full animate-fade-in-up">
-            <div className="w-24 h-24 rounded-full bg-muted/50 border border-border/30 flex items-center justify-center">
-              <LinkIcon className="w-12 h-12 text-muted-foreground" />
+            {/* Discover button */}
+            <Button
+              size="lg"
+              onClick={handleDiscover}
+              disabled={discovering}
+              className="group w-full h-16 text-lg rounded-3xl gap-3 bg-gradient-to-r from-primary to-primary/80 hover:from-primary/90 hover:to-primary/70 shadow-lg shadow-primary/25 active:scale-[0.98] transition-all duration-200"
+            >
+              <Radar
+                className={`w-6 h-6 ${discovering ? "animate-spin" : "group-hover:scale-110 transition-transform"}`}
+              />
+              {discovering ? "Searching..." : "Find nearby monitors"}
+            </Button>
+
+            {/* Discovery results */}
+            {discovered !== null && (
+              <div className="w-full flex flex-col gap-3 animate-fade-in-up">
+                {discovered.length === 0 ? (
+                  <div className="p-5 bg-muted/50 rounded-2xl border border-border/30 text-center">
+                    <p className="text-sm text-muted-foreground">
+                      No monitors found on your network
+                    </p>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Make sure the baby device has started monitoring
+                    </p>
+                  </div>
+                ) : (
+                  <>
+                    <p className="text-sm font-semibold text-foreground">
+                      Found on your network:
+                    </p>
+                    {discovered.map((m) => (
+                      <button
+                        key={m.sessionId}
+                        onClick={() => {
+                          setSelectedSession(m.sessionId);
+                          setPinInput("");
+                        }}
+                        className="w-full p-4 bg-card rounded-2xl border border-border/50 shadow-sm flex items-center gap-4 hover:bg-muted/30 active:scale-[0.98] transition-all text-left"
+                      >
+                        <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-primary/15 to-warm-amber/10 flex items-center justify-center">
+                          <Baby className="w-6 h-6 text-primary" />
+                        </div>
+                        <div>
+                          <p className="font-semibold text-foreground">
+                            {m.babyName}
+                          </p>
+                          <p className="text-xs text-muted-foreground">
+                            Tap to connect
+                          </p>
+                        </div>
+                      </button>
+                    ))}
+                  </>
+                )}
+              </div>
+            )}
+
+            {/* Divider */}
+            <div className="flex items-center gap-3 w-full">
+              <div className="flex-1 h-px bg-border/50" />
+              <span className="text-xs text-muted-foreground">or</span>
+              <div className="flex-1 h-px bg-border/50" />
             </div>
-            <p className="text-base text-muted-foreground text-center max-w-xs leading-relaxed">
-              Paste the session link or scan the QR code on the baby device
-            </p>
+
+            {/* Manual input */}
             <div className="w-full flex flex-col gap-3">
               <Input
                 type="text"
@@ -113,9 +211,52 @@ function ReceiverContent() {
               />
               <Button
                 size="lg"
-                onClick={handleConnect}
+                onClick={() => handleConnect()}
                 disabled={!sessionInput.trim()}
                 className="h-14 rounded-3xl text-lg gap-2 shadow-md active:scale-[0.98] transition-all"
+              >
+                <Headphones className="w-5 h-5" />
+                Connect
+              </Button>
+            </div>
+          </div>
+        )}
+
+        {/* PIN entry for discovered monitor */}
+        {status === "idle" && selectedSession && (
+          <div className="flex flex-col items-center gap-6 w-full animate-fade-in-up">
+            <div className="w-20 h-20 rounded-full bg-gradient-to-br from-primary/15 to-warm-amber/10 flex items-center justify-center shadow-lg shadow-primary/10">
+              <Baby className="w-10 h-10 text-primary" />
+            </div>
+            <p className="text-base font-semibold text-foreground text-center">
+              Enter PIN to connect
+            </p>
+            <Input
+              type="text"
+              inputMode="numeric"
+              pattern="[0-9]*"
+              maxLength={4}
+              placeholder="4-digit PIN"
+              value={pinInput}
+              onChange={(e) =>
+                setPinInput(e.target.value.replace(/\D/g, "").slice(0, 4))
+              }
+              className="h-14 rounded-2xl border-border/50 shadow-sm text-center text-2xl tracking-[0.5em] font-bold"
+            />
+            <div className="flex gap-3 w-full">
+              <Button
+                variant="outline"
+                size="lg"
+                onClick={() => setSelectedSession(null)}
+                className="flex-1 h-14 rounded-3xl text-lg"
+              >
+                Back
+              </Button>
+              <Button
+                size="lg"
+                onClick={handlePinSubmit}
+                disabled={pinInput.length !== 4}
+                className="flex-1 h-14 rounded-3xl text-lg gap-2 bg-gradient-to-r from-primary to-primary/80 shadow-lg shadow-primary/25 active:scale-[0.98] transition-all"
               >
                 <Headphones className="w-5 h-5" />
                 Connect
@@ -147,11 +288,12 @@ function ReceiverContent() {
                 Connected to baby device!
               </p>
               <p className="text-sm text-warm-green-foreground/70 mt-1">
-                {muted ? "Audio muted — tap unmute to listen" : "Listening live"}
+                {muted
+                  ? "Audio muted — tap unmute to listen"
+                  : "Listening live"}
               </p>
             </div>
 
-            {/* Audio Waveform — always visible */}
             <div className="w-full p-6 bg-card rounded-3xl border border-border/50 shadow-sm">
               <div className="flex items-center justify-center gap-2 mb-4">
                 {muted ? (
@@ -166,7 +308,6 @@ function ReceiverContent() {
               <AudioWaveform level={audioLevel} />
             </div>
 
-            {/* Mute/Unmute */}
             <Button
               size="lg"
               onClick={toggleMute}
@@ -189,7 +330,6 @@ function ReceiverContent() {
               )}
             </Button>
 
-            {/* Disconnect */}
             <Button
               variant="destructive"
               size="lg"
@@ -225,7 +365,7 @@ function ReceiverContent() {
             </div>
             <Button
               size="lg"
-              onClick={handleConnect}
+              onClick={() => handleConnect()}
               className="w-full h-14 rounded-3xl text-lg shadow-md active:scale-[0.98] transition-all"
             >
               Try Again
