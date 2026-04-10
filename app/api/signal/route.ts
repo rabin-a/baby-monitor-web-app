@@ -97,14 +97,20 @@ async function getDiscoverableSessions(
     const sessionIds = await redis.smembers(`discover:${ip}`);
     for (const sid of sessionIds) {
       const session = await getSession(sid as string);
-      if (session?.networkOnly && session.senderIp === ip && session.babyName) {
-        results.push({ sessionId: sid as string, babyName: session.babyName });
+      if (session?.networkOnly && session.senderIp === ip) {
+        results.push({
+          sessionId: sid as string,
+          babyName: session.babyName || "Baby Monitor",
+        });
       }
     }
   } else {
     for (const [sid, session] of localSessions.entries()) {
-      if (session.networkOnly && session.senderIp === ip && session.babyName) {
-        results.push({ sessionId: sid, babyName: session.babyName });
+      if (session.networkOnly && session.senderIp === ip) {
+        results.push({
+          sessionId: sid,
+          babyName: session.babyName || "Baby Monitor",
+        });
       }
     }
   }
@@ -116,9 +122,12 @@ function getClientIp(request: NextRequest): string {
   return (
     request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
     request.headers.get("x-real-ip") ||
-    "unknown"
+    "local"
   );
 }
+
+// In local dev (no proxy), all clients get "local" as IP — they always match.
+// On Vercel, x-forwarded-for provides the real public IP.
 
 function parseDevice(ua: string): string {
   if (/iPhone/i.test(ua)) return "iPhone";
@@ -168,6 +177,9 @@ export async function POST(request: NextRequest) {
 
       case "network-only": {
         session.networkOnly = true;
+        if (session.senderIp) {
+          await addToDiscoveryIndex(session.senderIp, sessionId);
+        }
         break;
       }
 
@@ -176,7 +188,7 @@ export async function POST(request: NextRequest) {
         if (meta.babyName) session.babyName = meta.babyName;
         if (meta.pin) session.pin = meta.pin;
         // Add to discovery index if networkOnly
-        if (session.networkOnly && session.senderIp && session.babyName) {
+        if (session.networkOnly && session.senderIp) {
           await addToDiscoveryIndex(session.senderIp, sessionId);
         }
         break;
