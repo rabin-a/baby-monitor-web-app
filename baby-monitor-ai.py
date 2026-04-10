@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-Baby Monitor AI — local bridge to Claude Code CLI.
+Baby Monitor AI - local bridge to Claude Code CLI.
 
 Runs a small HTTP server that receives audio from the baby monitor
 receiver page and pipes it to Claude for classification.
 
 Usage:
-    python baby-monitor-ai.py
-    python baby-monitor-ai.py --port 9877
+    python3 baby-monitor-ai.py
+    python3 baby-monitor-ai.py --port 9877
 
 Requires:
-    - Claude Code CLI installed (`claude` command available)
+    - Claude Code CLI installed (claude command available)
     - Same network as the baby monitor sender
 """
 
@@ -53,9 +54,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
 
     def do_OPTIONS(self):
-        self.send_response(204)
-        self._cors_headers()
-        self.end_headers()
+        try:
+            self.send_response(204)
+            self._cors_headers()
+            self.end_headers()
+        except BrokenPipeError:
+            pass
 
     def do_GET(self):
         """Health check + config endpoint"""
@@ -64,28 +68,14 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/config" and "mode" in params:
             BridgeHandler.monitoring_mode = params["mode"][0]
-            self.send_response(200)
-            self._cors_headers()
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(
-                json.dumps({"mode": BridgeHandler.monitoring_mode}).encode()
-            )
+            self._respond(200, {"mode": BridgeHandler.monitoring_mode})
             return
 
-        self.send_response(200)
-        self._cors_headers()
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(
-            json.dumps(
-                {
-                    "alive": True,
-                    "service": "baby-monitor-ai",
-                    "mode": BridgeHandler.monitoring_mode,
-                }
-            ).encode()
-        )
+        self._respond(200, {
+            "alive": True,
+            "service": "baby-monitor-ai",
+            "mode": BridgeHandler.monitoring_mode,
+        })
 
     def do_POST(self):
         """Receive audio, analyze with Claude CLI"""
@@ -153,11 +143,14 @@ Classify what you hear. Respond with ONLY a JSON object: {{"status": "sleeping"|
             self._respond(500, {"error": str(e)})
 
     def _respond(self, code, data):
-        self.send_response(code)
-        self._cors_headers()
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(json.dumps(data).encode())
+        try:
+            self.send_response(code)
+            self._cors_headers()
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(data).encode())
+        except BrokenPipeError:
+            pass
 
 
 def main():
