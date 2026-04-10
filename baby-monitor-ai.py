@@ -1,57 +1,59 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Baby Monitor AI - local bridge to Claude Code CLI.
+Baby Monitor AI - local bridge using Claude API for audio analysis.
 
 Runs a small HTTP server that receives audio from the baby monitor
-receiver page and pipes it to Claude for classification.
+receiver page and sends it to Claude for classification.
 
 Usage:
+    pip install anthropic
     python3 baby-monitor-ai.py
-    python3 baby-monitor-ai.py --port 9877
 
 Requires:
-    - Claude Code CLI installed (claude command available)
+    - ANTHROPIC_API_KEY environment variable set
     - Same network as the baby monitor sender
 """
 
 import argparse
 import json
-import subprocess
-import tempfile
-import os
 import base64
+import os
+import sys
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
+try:
+    import anthropic
+except ImportError:
+    print("Error: 'anthropic' package not found.")
+    print("  pip install anthropic")
+    sys.exit(1)
+
 DEFAULT_PORT = 9877
-
-SYSTEM_PROMPT = """You are monitoring a baby via an audio baby monitor.
-Analyze the audio and classify what you hear. Respond with ONLY a JSON object:
-
-{"status": "sleeping" | "crying" | "fussing" | "babbling" | "coughing" | "noise", "confidence": "high" | "medium" | "low", "description": "brief one-line description"}
-
-Rules:
-- "sleeping" = silence or very quiet background noise
-- "crying" = distressed baby crying
-- "fussing" = mild whimpering or unsettled sounds
-- "babbling" = happy baby sounds, cooing, talking
-- "coughing" = coughing or sneezing
-- "noise" = non-baby sounds (TV, adults talking, etc.)
-"""
 
 
 class BridgeHandler(BaseHTTPRequestHandler):
-    monitoring_mode = "notify_crying"  # default
+    monitoring_mode = "notify_crying"
+    client = None
 
     def log_message(self, format, *args):
-        # Quieter logging
         print(f"[baby-monitor-ai] {args[0]}")
 
     def _cors_headers(self):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
+
+    def _respond(self, code, data):
+        try:
+            self.send_response(code)
+            self._cors_headers()
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(data).encode())
+        except BrokenPipeError:
+            pass
 
     def do_OPTIONS(self):
         try:
@@ -62,7 +64,6 @@ class BridgeHandler(BaseHTTPRequestHandler):
             pass
 
     def do_GET(self):
-        """Health check + config endpoint"""
         parsed = urlparse(self.path)
         params = parse_qs(parsed.query)
 
@@ -78,7 +79,6 @@ class BridgeHandler(BaseHTTPRequestHandler):
         })
 
     def do_POST(self):
-        """Receive audio, analyze with Claude CLI"""
         content_length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(content_length)
 
@@ -91,66 +91,72 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 self._respond(400, {"error": "No audio data"})
                 return
 
-            # Save audio to temp file
-            suffix = ".webm" if "webm" in content_type else ".wav"
-            with tempfile.NamedTemporaryFile(
-                suffix=suffix, delete=False
-            ) as f:
-                f.write(base64.b64decode(audio_b64))
-                temp_path = f.name
+            # Determine media type for Claude API
+            media_type = "audio/webm"
+            if "wav" in content_type:
+                media_type = "audio/wav"
+            elif "ogg" in content_type:
+                media_type = "audio/ogg"
+            elif "mp3" in content_type or "mpeg" in content_type:
+                media_type = "audio/mp3"
+
+            print(f"[baby-monitor-ai] Analyzing {len(audio_b64)} bytes of audio...")
+
+            prompt = (
+                f"Monitoring mode: {BridgeHandler.monitoring_mode}. "
+                "Classify what you hear from this baby monitor. "
+                'Respond with ONLY a JSON object: '
+                '{"status": "sleeping"|"crying"|"fussing"|"babbling"|"coughing"|"noise", '
+                '"confidence": "high"|"medium"|"low", '
+                '"description": "brief one-line description"}'
+            )
+
+            response = BridgeHandler.client.messages.create(
+                model="claude-sonnet-4-20250514",
+                max_tokens=200,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": prompt,
+                            },
+                            {
+                                "type": "document",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": media_type,
+                                    "data": audio_b64,
+                                },
+                            },
+                        ],
+                    }
+                ],
+            )
+
+            output = response.content[0].text.strip()
+            print(f"[baby-monitor-ai] Result: {output}")
 
             try:
-                # Call claude CLI with the audio file
-                prompt = f"""Analyze this baby monitor audio recording.
-Current monitoring mode: {BridgeHandler.monitoring_mode}
-Classify what you hear. Respond with ONLY a JSON object: {{"status": "sleeping"|"crying"|"fussing"|"babbling"|"coughing"|"noise", "confidence": "high"|"medium"|"low", "description": "brief description"}}"""
+                start = output.index("{")
+                end = output.rindex("}") + 1
+                analysis = json.loads(output[start:end])
+            except (ValueError, json.JSONDecodeError):
+                analysis = {
+                    "status": "noise",
+                    "confidence": "low",
+                    "description": output[:200] if output else "No response",
+                }
 
-                result = subprocess.run(
-                    [
-                        "claude",
-                        "-p",
-                        prompt,
-                        "--allowedTools",
-                        "",
-                        temp_path,
-                    ],
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                )
+            self._respond(200, analysis)
 
-                output = result.stdout.strip()
-
-                # Try to parse JSON from the output
-                try:
-                    # Find JSON in the output
-                    start = output.index("{")
-                    end = output.rindex("}") + 1
-                    analysis = json.loads(output[start:end])
-                except (ValueError, json.JSONDecodeError):
-                    analysis = {
-                        "status": "noise",
-                        "confidence": "low",
-                        "description": output[:200] if output else "No response",
-                    }
-
-                self._respond(200, analysis)
-
-            finally:
-                os.unlink(temp_path)
-
+        except anthropic.APIError as e:
+            print(f"[baby-monitor-ai] API error: {e}")
+            self._respond(500, {"error": f"Claude API error: {str(e)}"})
         except Exception as e:
+            print(f"[baby-monitor-ai] Error: {e}")
             self._respond(500, {"error": str(e)})
-
-    def _respond(self, code, data):
-        try:
-            self.send_response(code)
-            self._cors_headers()
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps(data).encode())
-        except BrokenPipeError:
-            pass
 
 
 def main():
@@ -158,15 +164,14 @@ def main():
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     args = parser.parse_args()
 
-    # Check claude CLI is available
-    try:
-        subprocess.run(
-            ["claude", "--version"], capture_output=True, check=True
-        )
-    except FileNotFoundError:
-        print("Error: 'claude' CLI not found. Install Claude Code first.")
-        print("  npm install -g @anthropic-ai/claude-code")
-        return
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        print("Error: ANTHROPIC_API_KEY environment variable not set.")
+        print("  export ANTHROPIC_API_KEY=sk-ant-...")
+        sys.exit(1)
+
+    BridgeHandler.client = anthropic.Anthropic(api_key=api_key)
+    print(f"[baby-monitor-ai] Claude API connected")
 
     server = HTTPServer(("0.0.0.0", args.port), BridgeHandler)
     print(f"[baby-monitor-ai] Running on http://0.0.0.0:{args.port}")
