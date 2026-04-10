@@ -360,6 +360,8 @@ export function useWebRTCReceiver() {
   const [muted, setMuted] = useState(true);
   const [sessionEnded, setSessionEnded] = useState(false);
 
+  const [audioStream, setAudioStream] = useState<MediaStream | null>(null);
+
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
@@ -476,6 +478,7 @@ export function useWebRTCReceiver() {
 
         pc.ontrack = async (event) => {
           const [stream] = event.streams;
+          setAudioStream(stream);
           const audio = new Audio();
           audio.srcObject = stream;
           audio.muted = true;
@@ -567,6 +570,7 @@ export function useWebRTCReceiver() {
 
   const disconnect = useCallback(() => {
     cleanupConnection();
+    setAudioStream(null);
     setStatus("idle");
     setAudioLevel(0);
     setMuted(true);
@@ -581,6 +585,7 @@ export function useWebRTCReceiver() {
   return {
     status,
     audioLevel,
+    audioStream,
     error,
     muted,
     sessionEnded,

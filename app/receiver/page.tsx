@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, Suspense } from "react";
+import { useState, useCallback, useEffect, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
@@ -8,9 +8,11 @@ import { Input } from "@/components/ui/input";
 import { StatusIndicator } from "@/components/status-indicator";
 import { AudioWaveform } from "@/components/audio-waveform";
 import { useWebRTCReceiver } from "@/hooks/use-webrtc";
+import { useAIMonitor } from "@/hooks/use-ai-monitor";
 import {
   ArrowLeft,
   Baby,
+  Bot,
   Headphones,
   Link as LinkIcon,
   Radar,
@@ -30,6 +32,7 @@ function ReceiverContent() {
   const {
     status,
     audioLevel,
+    audioStream,
     error,
     muted,
     sessionEnded,
@@ -37,6 +40,8 @@ function ReceiverContent() {
     disconnect,
     toggleMute,
   } = useWebRTCReceiver();
+
+  const ai = useAIMonitor();
   const [sessionInput, setSessionInput] = useState("");
   const [lastSession, setLastSession] = useState<string | null>(null);
 
@@ -47,6 +52,27 @@ function ReceiverContent() {
   );
   const [selectedSession, setSelectedSession] = useState<string | null>(null);
   const [pinInput, setPinInput] = useState("");
+
+  // Detect AI bridge on mount
+  useEffect(() => {
+    ai.detectBridge();
+    // Request notification permission early
+    if (typeof Notification !== "undefined" && Notification.permission === "default") {
+      Notification.requestPermission();
+    }
+  }, [ai.detectBridge]);
+
+  // Feed audio level to AI monitor for VAD
+  useEffect(() => {
+    if (ai.enabled) ai.onAudioLevel(audioLevel);
+  }, [audioLevel, ai.enabled, ai.onAudioLevel]);
+
+  // Start AI monitoring when connected and stream is available
+  useEffect(() => {
+    if (status === "connected" && audioStream && ai.enabled) {
+      ai.startMonitoring(audioStream);
+    }
+  }, [status, audioStream, ai.enabled, ai.startMonitoring]);
 
   const handleConnect = useCallback(
     (sid?: string, pin?: string) => {
@@ -330,10 +356,112 @@ function ReceiverContent() {
               )}
             </Button>
 
+            {/* AI Monitor */}
+            {ai.available && (
+              <div className="w-full p-5 bg-card rounded-3xl border border-border/50 shadow-sm">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2">
+                    <Bot className="w-5 h-5 text-primary" />
+                    <p className="text-sm font-semibold text-foreground">
+                      AI Monitor
+                    </p>
+                  </div>
+                  <button
+                    onClick={() =>
+                      ai.enabled
+                        ? ai.stopMonitoring()
+                        : audioStream && ai.startMonitoring(audioStream)
+                    }
+                    className={`px-3 py-1 rounded-full text-xs font-medium transition-all ${
+                      ai.enabled
+                        ? "bg-warm-green/15 text-warm-green-foreground"
+                        : "bg-muted text-muted-foreground hover:bg-muted/80"
+                    }`}
+                  >
+                    {ai.enabled ? "Active" : "Enable"}
+                  </button>
+                </div>
+
+                {ai.enabled && (
+                  <div className="flex flex-col gap-3">
+                    {/* Mode selector */}
+                    <div className="flex rounded-full bg-muted/60 p-1">
+                      <button
+                        onClick={() => ai.changeMode("notify_crying")}
+                        className={`flex-1 py-1.5 rounded-full text-xs font-medium transition-all ${
+                          ai.mode === "notify_crying"
+                            ? "bg-primary text-primary-foreground shadow-sm"
+                            : "text-muted-foreground"
+                        }`}
+                      >
+                        Crying only
+                      </button>
+                      <button
+                        onClick={() => ai.changeMode("notify_any")}
+                        className={`flex-1 py-1.5 rounded-full text-xs font-medium transition-all ${
+                          ai.mode === "notify_any"
+                            ? "bg-primary text-primary-foreground shadow-sm"
+                            : "text-muted-foreground"
+                        }`}
+                      >
+                        Any sound
+                      </button>
+                    </div>
+
+                    {/* Status */}
+                    {ai.analyzing && (
+                      <p className="text-xs text-primary animate-gentle-pulse text-center">
+                        Analyzing audio...
+                      </p>
+                    )}
+
+                    {ai.lastAnalysis && (
+                      <div
+                        className={`p-3 rounded-xl text-center text-sm ${
+                          ["crying", "fussing"].includes(ai.lastAnalysis.status)
+                            ? "bg-destructive/10 text-destructive font-semibold"
+                            : ai.lastAnalysis.status === "sleeping"
+                              ? "bg-warm-green/10 text-warm-green-foreground"
+                              : "bg-muted/50 text-muted-foreground"
+                        }`}
+                      >
+                        {ai.lastAnalysis.description}
+                      </div>
+                    )}
+
+                    {/* Recent log */}
+                    {ai.log.length > 1 && (
+                      <div className="flex flex-col gap-1 max-h-24 overflow-y-auto">
+                        {ai.log.slice(1, 5).map((entry, i) => (
+                          <p
+                            key={i}
+                            className="text-xs text-muted-foreground truncate"
+                          >
+                            {new Date(entry.timestamp).toLocaleTimeString()} —{" "}
+                            {entry.description}
+                          </p>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {!ai.enabled && (
+                  <p className="text-xs text-muted-foreground">
+                    Claude Code detects sounds and notifies you when baby needs
+                    attention
+                  </p>
+                )}
+              </div>
+            )}
+
             <Button
               variant="destructive"
               size="lg"
-              onClick={disconnect}
+              onClick={() => {
+                ai.stopMonitoring();
+                disconnect();
+              }}
               className="w-full h-14 rounded-3xl text-lg gap-2 shadow-md active:scale-[0.98] transition-all"
             >
               Disconnect
