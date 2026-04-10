@@ -246,13 +246,18 @@ export async function POST(request: NextRequest) {
           break;
         }
 
+        // If correct PIN was provided, auto-approve and lock
+        const pinValid = session.pin && session.pin === submittedPin;
         session.listeners.push({
           id: listenerId,
           ip,
           device: parseDevice(ua),
           timestamp: Date.now(),
-          status: "pending",
+          status: pinValid ? "approved" : "pending",
         });
+        if (pinValid) {
+          session.locked = true;
+        }
         break;
       }
 
